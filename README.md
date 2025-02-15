@@ -195,4 +195,95 @@ class TradingEngine:
                
     def select_stocks(self):
         # Implement enhanced fundamental+technical screening
-        return CONFIG["NIFTY_25"][:
+        return CONFIG["NIFTY_25"][:5]  # Temporary implementation
+        
+    def execute_strategy(self):
+        if self.risk_manager.circuit_breaker():
+            NotificationSystem.send_alert("CIRCUIT BREAKER ACTIVATED", 
+                "Daily loss limit reached. Trading halted.")
+            return False
+            
+        if not self.market_hours():
+            logging.info("Market closed")
+            return False
+            
+        try:
+            symbols = self.select_stocks()
+            position_size = self.risk_manager.calculate_position_size(
+                self.portfolio_value) / len(symbols)
+                
+            for symbol in symbols:
+                self.process_symbol(symbol, position_size)
+                
+            return True
+        except Exception as e:
+            logging.error(f"Strategy execution failed: {str(e)}")
+            return False
+            
+    def process_symbol(self, symbol, position_size):
+        try:
+            daily_data = self.api.get_historical_data(symbol, 'DAY', 21)
+            intra_data = self.api.get_historical_data(symbol, '1_MIN', 21*75)
+            
+            daily_signal = self.ma_crossover(daily_data)
+            intra_signal = self.ma_crossover(intra_data)
+            
+            if daily_signal == 'BUY' and intra_signal == 'BUY':
+                self.execute_trade(symbol, 'BUY', position_size)
+            elif daily_signal == 'SELL' or intra_signal == 'SELL':
+                self.execute_trade(symbol, 'SELL', position_size)
+                
+        except Exception as e:
+            logging.error(f"Error processing {symbol}: {str(e)}")
+            
+    def ma_crossover(self, data):
+        if data is None or len(data) < 21:
+            return 'HOLD'
+            
+        data['MA7'] = data['close'].rolling(7).mean()
+        data['MA14'] = data['close'].rolling(14).mean()
+        data['MA21'] = data['close'].rolling(21).mean()
+        
+        if data['MA7'].iloc[-1] > data['MA14'].iloc[-1] and \
+           data['MA14'].iloc[-1] > data['MA21'].iloc[-1]:
+            return 'BUY'
+        elif data['MA7'].iloc[-1] < data['MA14'].iloc[-1]:
+            return 'SELL'
+        return 'HOLD'
+            
+    def execute_trade(self, symbol, action, quantity):
+        order_id = self.api.place_order(symbol, action, quantity)
+        if order_id:
+            trade_data = (
+                datetime.now(),
+                symbol,
+                action,
+                quantity,
+                self.api.get_live_quote(symbol)['lastPrice'],
+                order_id
+            )
+            self.performance_tracker.update_trade(trade_data)
+            NotificationSystem.send_alert(
+                f"Trade Executed: {symbol} {action}",
+                f"{quantity} shares of {symbol} {action} at {trade_data[4]}"
+            )
+
+def main():
+    engine = TradingEngine()
+    while True:
+        try:
+            if engine.market_hours():
+                engine.execute_strategy()
+                time.sleep(300)  # 5 minutes
+            else:
+                time.sleep(3600)  # 1 hour
+        except KeyboardInterrupt:
+            logging.info("Shutting down gracefully...")
+            break
+        except Exception as e:
+            logging.error(f"Critical error: {str(e)}")
+            NotificationSystem.send_alert("CRITICAL ERROR", str(e))
+            time.sleep(600)
+
+if __name__ == "__main__":
+    main()
